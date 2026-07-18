@@ -101,14 +101,64 @@ def section_header(number, title):
 
 
 periods = sorted(sales["회계기간"].unique())
+years = sorted({p[:4] for p in periods})
+
+
+def quarter_months(q):
+    start = (q - 1) * 3 + 1
+    return [start, start + 1, start + 2]
+
 
 st.sidebar.subheader("🔍 조회 조건")
-start_period, end_period = st.sidebar.select_slider(
-    "조회 기간 (부터 ~ 까지)",
-    options=periods,
-    value=(periods[0], periods[-1]),
-)
-selected_periods = [p for p in periods if start_period <= p <= end_period]
+view_mode = st.sidebar.radio("조회 단위", ["월별", "분기별", "연별"], horizontal=True)
+
+if view_mode == "월별":
+    selected_month = st.sidebar.selectbox(
+        "조회 월",
+        periods,
+        index=len(periods) - 1,
+        format_func=lambda p: f"{p[2:4]}년 {int(p[5:7])}월",
+    )
+    selected_periods = [selected_month]
+    month_idx = periods.index(selected_month)
+    comparison_periods = [periods[month_idx - 1]] if month_idx > 0 else []
+    comparison_word = "전월"
+
+elif view_mode == "분기별":
+    quarter_options = [
+        (y, q)
+        for y in years
+        for q in range(1, 5)
+        if any(f"{y}-{m:02d}" in periods for m in quarter_months(q))
+    ]
+    selected_quarter = st.sidebar.selectbox(
+        "조회 분기",
+        quarter_options,
+        index=len(quarter_options) - 1,
+        format_func=lambda yq: f"{yq[0][2:]}년 {yq[1]}분기",
+    )
+    sel_year, sel_quarter = selected_quarter
+    selected_periods = [
+        p for p in periods if p[:4] == sel_year and int(p[5:7]) in quarter_months(sel_quarter)
+    ]
+    prev_year, prev_quarter = (sel_year, sel_quarter - 1) if sel_quarter > 1 else (str(int(sel_year) - 1), 4)
+    comparison_periods = [
+        p for p in periods if p[:4] == prev_year and int(p[5:7]) in quarter_months(prev_quarter)
+    ]
+    comparison_word = "전분기"
+
+else:  # 연별
+    selected_year = st.sidebar.selectbox(
+        "조회 연도",
+        years,
+        index=len(years) - 1,
+        format_func=lambda y: f"{y}년",
+    )
+    selected_periods = [p for p in periods if p[:4] == selected_year]
+    prev_year = str(int(selected_year) - 1)
+    comparison_periods = [p for p in periods if p[:4] == prev_year]
+    comparison_word = "전년"
+
 st.sidebar.caption(f"데이터 범위: {periods[0]} ~ {periods[-1]}")
 
 
@@ -135,7 +185,7 @@ def calc_operating_profit(periods_list):
     return calc_total_revenue(periods_list) - total_cogs - total_sga
 
 
-def calc_kpis(periods_list):
+def calc_kpis(periods_list, comparison_periods):
     total_revenue = calc_total_revenue(periods_list)
     total_cogs, total_sga = calc_cost_components(periods_list)
     total_cost = total_cogs + total_sga
@@ -145,19 +195,11 @@ def calc_kpis(periods_list):
     total_budget = budget.loc[budget["회계기간"].isin(periods_list), "예산매출"].sum()
     budget_achievement = total_revenue / total_budget * 100 if total_budget else None
 
-    end_period = periods_list[-1]
-    end_idx = periods.index(end_period)
-    if end_idx > 0:
-        prev_period = periods[end_idx - 1]
-        current_month_revenue = calc_total_revenue([end_period])
-        prev_month_revenue = calc_total_revenue([prev_period])
-        mom_growth = (
-            (current_month_revenue - prev_month_revenue) / prev_month_revenue * 100
-            if prev_month_revenue
-            else None
-        )
+    if comparison_periods:
+        prev_revenue = calc_total_revenue(comparison_periods)
+        growth = (total_revenue - prev_revenue) / prev_revenue * 100 if prev_revenue else None
     else:
-        mom_growth = None
+        growth = None
 
     return {
         "총매출": total_revenue,
@@ -165,11 +207,11 @@ def calc_kpis(periods_list):
         "영업이익": operating_profit,
         "영업이익률": operating_margin,
         "예산달성률": budget_achievement,
-        "전월 대비 증감률": mom_growth,
+        "증감률": growth,
     }
 
 
-kpis = calc_kpis(selected_periods)
+kpis = calc_kpis(selected_periods, comparison_periods)
 
 
 def fmt_amount(value):
@@ -189,7 +231,7 @@ row1_col3.metric("영업이익", fmt_amount(kpis["영업이익"]))
 row2_col1, row2_col2, row2_col3 = st.columns(3)
 row2_col1.metric("영업이익률", fmt_percent(kpis["영업이익률"]))
 row2_col2.metric("예산달성률", fmt_percent(kpis["예산달성률"]))
-row2_col3.metric("전월 대비 증감률", fmt_percent(kpis["전월 대비 증감률"]))
+row2_col3.metric(f"{comparison_word} 대비 증감률", fmt_percent(kpis["증감률"]))
 
 
 def build_monthly_summary(periods_list):
@@ -233,7 +275,7 @@ def build_monthly_trend_chart(summary):
 
 st.divider()
 section_header("②", "월별 손익 추이")
-monthly_summary = build_monthly_summary(selected_periods)
+monthly_summary = build_monthly_summary(periods)
 st.plotly_chart(build_monthly_trend_chart(monthly_summary), use_container_width=True)
 
 
@@ -500,48 +542,45 @@ section_header("⑧", "Waterfall")
 st.plotly_chart(build_pl_waterfall_chart(selected_periods), use_container_width=True)
 
 
-def generate_cfo_insight(periods_list, kpis, bu_summary, budget_summary):
+def generate_cfo_insight(periods_list, comparison_periods, comparison_word, kpis, bu_summary, budget_summary):
     insights = []
-    end_period = periods_list[-1]
-    end_idx = periods.index(end_period)
-    prev_period = periods[end_idx - 1] if end_idx > 0 else None
 
     # ① 매출 증가 여부
-    mom = kpis["전월 대비 증감률"]
-    if mom is None:
-        insights.append("전월 데이터가 없어 매출 증감률을 계산할 수 없습니다.")
+    growth = kpis["증감률"]
+    if growth is None:
+        insights.append(f"비교할 {comparison_word} 데이터가 없어 매출 증감률을 계산할 수 없습니다.")
     else:
-        direction = "증가" if mom >= 0 else "감소"
-        insights.append(f"매출은 전월 대비 {abs(mom):.1f}% {direction}했습니다.")
+        direction = "증가" if growth >= 0 else "감소"
+        insights.append(f"매출은 {comparison_word} 대비 {abs(growth):.1f}% {direction}했습니다.")
 
-    # 비용 계정별 전월 대비 증감 (②③⑦에서 활용) — 선택 기간과 무관하게 마지막 달 기준 단일 비교
+    # 비용 계정별 증감 (②③⑦에서 활용) — 선택 기간 합계 vs 비교 기간 합계
     cost_change = None
-    if prev_period is not None:
-        prev_cost = build_cost_by_account([prev_period]).groupby("계정명")["금액"].sum()
-        curr_cost = build_cost_by_account([end_period]).groupby("계정명")["금액"].sum()
+    if comparison_periods:
+        prev_cost = build_cost_by_account(comparison_periods).groupby("계정명")["금액"].sum()
+        curr_cost = build_cost_by_account(periods_list).groupby("계정명")["금액"].sum()
         cost_change = curr_cost.subtract(prev_cost, fill_value=0).rename("증감액").sort_values(ascending=False)
     top_cost_name = cost_change.index[0] if cost_change is not None and cost_change.iloc[0] > 0 else None
 
     # ② 영업이익 변화
     profit_change_pct = None
-    if prev_period is not None:
-        prev_profit = calc_operating_profit([prev_period])
-        current_month_profit = calc_operating_profit([end_period])
+    if comparison_periods:
+        prev_profit = calc_operating_profit(comparison_periods)
+        current_profit = calc_operating_profit(periods_list)
         if prev_profit:
-            profit_change_pct = (current_month_profit - prev_profit) / prev_profit * 100
+            profit_change_pct = (current_profit - prev_profit) / prev_profit * 100
 
     if profit_change_pct is None:
-        insights.append("전월 데이터가 없어 영업이익 변동을 비교할 수 없습니다.")
+        insights.append(f"비교할 {comparison_word} 데이터가 없어 영업이익 변동을 비교할 수 없습니다.")
     elif profit_change_pct < 0 and top_cost_name:
         insights.append(f"그러나 {top_cost_name} 증가로 영업이익률이 감소했습니다.")
     else:
         direction = "증가" if profit_change_pct >= 0 else "감소"
-        insights.append(f"영업이익은 전월 대비 {abs(profit_change_pct):.1f}% {direction}했습니다.")
+        insights.append(f"영업이익은 {comparison_word} 대비 {abs(profit_change_pct):.1f}% {direction}했습니다.")
 
     # ③ 가장 많이 증가한 비용 (②에서 이미 언급된 경우 생략)
     mentioned_in_profit_sentence = bool(profit_change_pct is not None and profit_change_pct < 0 and top_cost_name)
     if top_cost_name and not mentioned_in_profit_sentence:
-        insights.append(f"이번 달 비용 중에서는 {top_cost_name}이(가) 전월 대비 가장 많이 증가했습니다.")
+        insights.append(f"이번 기간 비용 중에서는 {top_cost_name}이(가) {comparison_word} 대비 가장 많이 증가했습니다.")
 
     # ④⑤ 사업부 수익성
     best_bu = bu_summary.loc[bu_summary["영업이익률"].idxmax()]
@@ -561,12 +600,14 @@ def generate_cfo_insight(periods_list, kpis, bu_summary, budget_summary):
     if cost_change is not None:
         rising = cost_change[cost_change > 0].head(2).index.tolist()
         if rising:
-            insights.append(f"다음 달에는 {', '.join(rising)} 관리가 필요합니다.")
+            insights.append(f"앞으로는 {', '.join(rising)} 관리가 필요합니다.")
 
     return insights
 
 
 st.divider()
 section_header("⑨", "AI CFO Insight 📌")
-cfo_insights = generate_cfo_insight(selected_periods, kpis, bu_summary, budget_summary)
+cfo_insights = generate_cfo_insight(
+    selected_periods, comparison_periods, comparison_word, kpis, bu_summary, budget_summary
+)
 st.markdown("\n".join(f"- {line}" for line in cfo_insights))
