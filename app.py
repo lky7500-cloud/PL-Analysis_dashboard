@@ -103,47 +103,59 @@ def section_header(number, title):
 periods = sorted(sales["회계기간"].unique())
 
 st.sidebar.subheader("🔍 조회 조건")
-selected_period = st.sidebar.selectbox("조회 기간", periods, index=len(periods) - 1)
+start_period, end_period = st.sidebar.select_slider(
+    "조회 기간 (부터 ~ 까지)",
+    options=periods,
+    value=(periods[0], periods[-1]),
+)
+selected_periods = [p for p in periods if start_period <= p <= end_period]
 st.sidebar.caption(f"데이터 범위: {periods[0]} ~ {periods[-1]}")
 
 
-def calc_total_revenue(period):
-    return sales.loc[sales["회계기간"] == period, "공급가액"].sum()
+def calc_total_revenue(periods_list):
+    return sales.loc[sales["회계기간"].isin(periods_list), "공급가액"].sum()
 
 
-def calc_cost_components(period):
-    sales_m = sales.loc[sales["회계기간"] == period].merge(
+def calc_cost_components(periods_list):
+    sales_m = sales.loc[sales["회계기간"].isin(periods_list)].merge(
         product[["제품코드", "표준원가"]], on="제품코드", how="left"
     )
     total_cogs = (sales_m["수량"] * sales_m["표준원가"]).sum()
 
     total_sga = gl_classified.loc[
-        (gl_classified["회계기간"] == period) & (gl_classified["계정분류"] == "판관비"),
+        gl_classified["회계기간"].isin(periods_list) & (gl_classified["계정분류"] == "판관비"),
         "금액",
     ].sum()
 
     return total_cogs, total_sga
 
 
-def calc_operating_profit(period):
-    total_cogs, total_sga = calc_cost_components(period)
-    return calc_total_revenue(period) - total_cogs - total_sga
+def calc_operating_profit(periods_list):
+    total_cogs, total_sga = calc_cost_components(periods_list)
+    return calc_total_revenue(periods_list) - total_cogs - total_sga
 
 
-def calc_kpis(period):
-    total_revenue = calc_total_revenue(period)
-    total_cogs, total_sga = calc_cost_components(period)
+def calc_kpis(periods_list):
+    total_revenue = calc_total_revenue(periods_list)
+    total_cogs, total_sga = calc_cost_components(periods_list)
     total_cost = total_cogs + total_sga
     operating_profit = total_revenue - total_cost
     operating_margin = operating_profit / total_revenue * 100 if total_revenue else None
 
-    total_budget = budget.loc[budget["회계기간"] == period, "예산매출"].sum()
+    total_budget = budget.loc[budget["회계기간"].isin(periods_list), "예산매출"].sum()
     budget_achievement = total_revenue / total_budget * 100 if total_budget else None
 
-    period_idx = periods.index(period)
-    if period_idx > 0:
-        prev_revenue = calc_total_revenue(periods[period_idx - 1])
-        mom_growth = (total_revenue - prev_revenue) / prev_revenue * 100 if prev_revenue else None
+    end_period = periods_list[-1]
+    end_idx = periods.index(end_period)
+    if end_idx > 0:
+        prev_period = periods[end_idx - 1]
+        current_month_revenue = calc_total_revenue([end_period])
+        prev_month_revenue = calc_total_revenue([prev_period])
+        mom_growth = (
+            (current_month_revenue - prev_month_revenue) / prev_month_revenue * 100
+            if prev_month_revenue
+            else None
+        )
     else:
         mom_growth = None
 
@@ -157,7 +169,7 @@ def calc_kpis(period):
     }
 
 
-kpis = calc_kpis(selected_period)
+kpis = calc_kpis(selected_periods)
 
 
 def fmt_amount(value):
@@ -180,18 +192,15 @@ row2_col2.metric("예산달성률", fmt_percent(kpis["예산달성률"]))
 row2_col3.metric("전월 대비 증감률", fmt_percent(kpis["전월 대비 증감률"]))
 
 
-def build_monthly_summary():
-    revenue = sales.groupby("회계기간")["공급가액"].sum().rename("총매출")
+def build_monthly_summary(periods_list):
+    sales_f = sales.loc[sales["회계기간"].isin(periods_list)]
+    revenue = sales_f.groupby("회계기간")["공급가액"].sum().rename("총매출")
 
-    sales_cost = sales.merge(product[["제품코드", "표준원가"]], on="제품코드", how="left")
+    sales_cost = sales_f.merge(product[["제품코드", "표준원가"]], on="제품코드", how="left")
     cogs = (sales_cost["수량"] * sales_cost["표준원가"]).groupby(sales_cost["회계기간"]).sum().rename("COGS")
 
-    sga = (
-        gl_classified.loc[gl_classified["계정분류"] == "판관비"]
-        .groupby("회계기간")["금액"]
-        .sum()
-        .rename("SGA")
-    )
+    gl_f = gl_classified.loc[gl_classified["회계기간"].isin(periods_list)]
+    sga = gl_f.loc[gl_f["계정분류"] == "판관비"].groupby("회계기간")["금액"].sum().rename("SGA")
 
     summary = pd.concat([revenue, cogs, sga], axis=1).fillna(0).reset_index()
     summary["총비용"] = summary["COGS"] + summary["SGA"]
@@ -205,17 +214,17 @@ def build_monthly_trend_chart(summary):
         fig.add_trace(
             go.Scatter(
                 x=summary["회계기간"],
-                y=summary[column],
+                y=summary[column] / 1e6,
                 name=column,
                 mode="lines+markers",
                 line=dict(color=color),
-                hovertemplate=f"{column}: " + "%{y:,.0f}원<extra></extra>",
+                hovertemplate=f"{column}: " + "%{y:,.0f}백만원<extra></extra>",
             )
         )
     fig.update_layout(
         title="월별 매출/비용/영업이익 추이",
         xaxis_title="회계기간",
-        yaxis_title="금액 (원)",
+        yaxis_title="금액 (백만원)",
         hovermode="x unified",
         template="plotly_white",
     )
@@ -224,18 +233,18 @@ def build_monthly_trend_chart(summary):
 
 st.divider()
 section_header("②", "월별 손익 추이")
-monthly_summary = build_monthly_summary()
+monthly_summary = build_monthly_summary(selected_periods)
 st.plotly_chart(build_monthly_trend_chart(monthly_summary), use_container_width=True)
 
 
-def build_business_unit_summary(period):
-    sales_p = sales.loc[sales["회계기간"] == period].merge(
+def build_business_unit_summary(periods_list):
+    sales_p = sales.loc[sales["회계기간"].isin(periods_list)].merge(
         product[["제품코드", "사업부", "표준원가"]], on="제품코드", how="left"
     )
     revenue = sales_p.groupby("사업부")["공급가액"].sum().rename("총매출")
     cogs = (sales_p["수량"] * sales_p["표준원가"]).groupby(sales_p["사업부"]).sum().rename("COGS")
 
-    gl_p = gl_classified.loc[gl_classified["회계기간"] == period]
+    gl_p = gl_classified.loc[gl_classified["회계기간"].isin(periods_list)]
     sga = gl_p.loc[gl_p["계정분류"] == "판관비"].groupby("사업부")["금액"].sum().rename("SGA")
 
     summary = pd.concat([revenue, cogs, sga], axis=1).fillna(0).reset_index()
@@ -253,10 +262,10 @@ def build_business_unit_chart(summary):
         fig.add_trace(
             go.Bar(
                 x=summary["사업부"],
-                y=summary[column],
+                y=summary[column] / 1e6,
                 name=column,
                 marker_color=color,
-                hovertemplate=f"{column}: " + "%{y:,.0f}원<extra></extra>",
+                hovertemplate=f"{column}: " + "%{y:,.0f}백만원<extra></extra>",
             ),
             secondary_y=False,
         )
@@ -277,14 +286,14 @@ def build_business_unit_chart(summary):
         barmode="group",
         template="plotly_white",
     )
-    fig.update_yaxes(title_text="금액 (원)", secondary_y=False)
+    fig.update_yaxes(title_text="금액 (백만원)", secondary_y=False)
     fig.update_yaxes(title_text="영업이익률 (%)", secondary_y=True)
     return fig
 
 
 st.divider()
 section_header("③", "사업부별 수익성")
-bu_summary = build_business_unit_summary(selected_period)
+bu_summary = build_business_unit_summary(selected_periods)
 st.plotly_chart(build_business_unit_chart(bu_summary), use_container_width=True)
 
 best_bu = bu_summary.loc[bu_summary["영업이익률"].idxmax()]
@@ -295,17 +304,19 @@ st.markdown(
 )
 
 
-def build_cost_by_account(period):
-    gl_p = gl_classified.loc[gl_classified["회계기간"] == period]
+def build_cost_by_account(periods_list):
+    gl_p = gl_classified.loc[gl_classified["회계기간"].isin(periods_list)]
     cost = gl_p.loc[gl_p["계정분류"].isin(["원가", "판관비"])]
     return cost.groupby(["계정분류", "계정명"])["금액"].sum().reset_index()
 
 
 def build_cost_treemap(summary):
-    fig = px.treemap(summary, path=["계정분류", "계정명"], values="금액", color="계정분류")
+    summary = summary.copy()
+    summary["금액_백만원"] = summary["금액"] / 1e6
+    fig = px.treemap(summary, path=["계정분류", "계정명"], values="금액_백만원", color="계정분류")
     fig.update_traces(
-        texttemplate="%{label}<br>%{value:,.0f}원<br>%{percentRoot:.1%}",
-        hovertemplate="%{label}<br>금액: %{value:,.0f}원<br>전체 대비: %{percentRoot:.1%}<extra></extra>",
+        texttemplate="%{label}<br>%{value:,.0f}백만원<br>%{percentRoot:.1%}",
+        hovertemplate="%{label}<br>금액: %{value:,.0f}백만원<br>전체 대비: %{percentRoot:.1%}<extra></extra>",
     )
     fig.update_layout(title="비용 계정별 구성 (Treemap)")
     return fig
@@ -313,15 +324,17 @@ def build_cost_treemap(summary):
 
 st.divider()
 section_header("④", "비용 분석")
-cost_summary = build_cost_by_account(selected_period)
+cost_summary = build_cost_by_account(selected_periods)
 st.plotly_chart(build_cost_treemap(cost_summary), use_container_width=True)
 
 
-def build_budget_vs_actual(period):
-    budget_bu = budget.loc[budget["회계기간"] == period].groupby("사업부")["예산매출"].sum().rename("예산")
+def build_budget_vs_actual(periods_list):
+    budget_bu = (
+        budget.loc[budget["회계기간"].isin(periods_list)].groupby("사업부")["예산매출"].sum().rename("예산")
+    )
 
     sales_bu = (
-        sales.loc[sales["회계기간"] == period]
+        sales.loc[sales["회계기간"].isin(periods_list)]
         .merge(product[["제품코드", "사업부"]], on="제품코드", how="left")
         .groupby("사업부")["공급가액"]
         .sum()
@@ -369,13 +382,13 @@ def build_budget_gauge_chart(summary):
 
 st.divider()
 section_header("⑤", "예산 대비 실적")
-budget_summary = build_budget_vs_actual(selected_period)
+budget_summary = build_budget_vs_actual(selected_periods)
 st.plotly_chart(build_budget_gauge_chart(budget_summary), use_container_width=True)
 
 
-def build_customer_revenue(period):
+def build_customer_revenue(periods_list):
     revenue = (
-        sales.loc[sales["회계기간"] == period]
+        sales.loc[sales["회계기간"].isin(periods_list)]
         .groupby("거래처코드")["공급가액"]
         .sum()
         .rename("매출")
@@ -395,17 +408,17 @@ def build_top_customer_chart(top10):
     ordered = top10.sort_values("매출")
     fig = go.Figure(
         go.Bar(
-            x=ordered["매출"],
+            x=ordered["매출"] / 1e6,
             y=ordered["거래처명"],
             orientation="h",
             marker_color="#4C78A8",
             customdata=ordered["비중"],
-            hovertemplate="%{y}<br>매출: %{x:,.0f}원<br>전체 대비: %{customdata:.1f}%<extra></extra>",
+            hovertemplate="%{y}<br>매출: %{x:,.0f}백만원<br>전체 대비: %{customdata:.1f}%<extra></extra>",
         )
     )
     fig.update_layout(
         title="거래처별 매출 TOP10",
-        xaxis_title="매출 (원)",
+        xaxis_title="매출 (백만원)",
         yaxis_title="거래처",
         template="plotly_white",
     )
@@ -414,24 +427,26 @@ def build_top_customer_chart(top10):
 
 st.divider()
 section_header("⑥", "거래처 TOP10")
-top10_customers, top10_concentration = build_customer_revenue(selected_period)
+top10_customers, top10_concentration = build_customer_revenue(selected_periods)
 st.plotly_chart(build_top_customer_chart(top10_customers), use_container_width=True)
 st.markdown(f"- 상위 10개 거래처 매출 집중도: 전체 매출의 **{top10_concentration:.1f}%**")
 
 
-def build_product_group_revenue(period):
-    sales_p = sales.loc[sales["회계기간"] == period].merge(
+def build_product_group_revenue(periods_list):
+    sales_p = sales.loc[sales["회계기간"].isin(periods_list)].merge(
         product[["제품코드", "사업부", "제품군"]], on="제품코드", how="left"
     )
     return sales_p.groupby(["사업부", "제품군"])["공급가액"].sum().reset_index()
 
 
 def build_product_group_sunburst(summary):
-    fig = px.sunburst(summary, path=["사업부", "제품군"], values="공급가액", color="사업부")
+    summary = summary.copy()
+    summary["공급가액_백만원"] = summary["공급가액"] / 1e6
+    fig = px.sunburst(summary, path=["사업부", "제품군"], values="공급가액_백만원", color="사업부")
     fig.update_traces(
-        texttemplate="%{label}<br>%{value:,.0f}원<br>%{percentRoot:.1%}",
+        texttemplate="%{label}<br>%{value:,.0f}백만원<br>%{percentRoot:.1%}",
         hovertemplate=(
-            "%{label}<br>매출: %{value:,.0f}원<br>상위 대비: %{percentParent:.1%}"
+            "%{label}<br>매출: %{value:,.0f}백만원<br>상위 대비: %{percentParent:.1%}"
             "<br>전체 대비: %{percentRoot:.1%}<extra></extra>"
         ),
     )
@@ -441,14 +456,16 @@ def build_product_group_sunburst(summary):
 
 st.divider()
 section_header("⑦", "제품군 분석")
-product_group_summary = build_product_group_revenue(selected_period)
+product_group_summary = build_product_group_revenue(selected_periods)
 st.plotly_chart(build_product_group_sunburst(product_group_summary), use_container_width=True)
 
 
-def build_pl_waterfall_chart(period):
-    total_revenue = calc_total_revenue(period)
-    total_cogs, total_sga = calc_cost_components(period)
-    operating_profit = calc_operating_profit(period)
+def build_pl_waterfall_chart(periods_list):
+    total_revenue = calc_total_revenue(periods_list) / 1e6
+    total_cogs, total_sga = calc_cost_components(periods_list)
+    total_cogs /= 1e6
+    total_sga /= 1e6
+    operating_profit = calc_operating_profit(periods_list) / 1e6
 
     fig = go.Figure(
         go.Waterfall(
@@ -457,10 +474,10 @@ def build_pl_waterfall_chart(period):
             x=["매출", "매출원가", "판관비", "영업이익"],
             y=[total_revenue, -total_cogs, -total_sga, 0],
             text=[
-                f"{total_revenue:,.0f}원",
-                f"-{total_cogs:,.0f}원",
-                f"-{total_sga:,.0f}원",
-                f"{operating_profit:,.0f}원",
+                f"{total_revenue:,.0f}백만원",
+                f"-{total_cogs:,.0f}백만원",
+                f"-{total_sga:,.0f}백만원",
+                f"{operating_profit:,.0f}백만원",
             ],
             textposition="outside",
             connector={"line": {"color": "rgb(130,130,130)"}},
@@ -471,7 +488,7 @@ def build_pl_waterfall_chart(period):
     )
     fig.update_layout(
         title="손익 Waterfall (매출 → 매출원가 → 판관비 → 영업이익)",
-        yaxis_title="금액 (원)",
+        yaxis_title="금액 (백만원)",
         template="plotly_white",
         showlegend=False,
     )
@@ -480,13 +497,14 @@ def build_pl_waterfall_chart(period):
 
 st.divider()
 section_header("⑧", "Waterfall")
-st.plotly_chart(build_pl_waterfall_chart(selected_period), use_container_width=True)
+st.plotly_chart(build_pl_waterfall_chart(selected_periods), use_container_width=True)
 
 
-def generate_cfo_insight(period, kpis, bu_summary, budget_summary, cost_summary):
+def generate_cfo_insight(periods_list, kpis, bu_summary, budget_summary):
     insights = []
-    period_idx = periods.index(period)
-    prev_period = periods[period_idx - 1] if period_idx > 0 else None
+    end_period = periods_list[-1]
+    end_idx = periods.index(end_period)
+    prev_period = periods[end_idx - 1] if end_idx > 0 else None
 
     # ① 매출 증가 여부
     mom = kpis["전월 대비 증감률"]
@@ -496,20 +514,21 @@ def generate_cfo_insight(period, kpis, bu_summary, budget_summary, cost_summary)
         direction = "증가" if mom >= 0 else "감소"
         insights.append(f"매출은 전월 대비 {abs(mom):.1f}% {direction}했습니다.")
 
-    # 비용 계정별 전월 대비 증감 (②③⑦에서 활용)
+    # 비용 계정별 전월 대비 증감 (②③⑦에서 활용) — 선택 기간과 무관하게 마지막 달 기준 단일 비교
     cost_change = None
     if prev_period is not None:
-        prev_cost = build_cost_by_account(prev_period).groupby("계정명")["금액"].sum()
-        curr_cost = cost_summary.groupby("계정명")["금액"].sum()
+        prev_cost = build_cost_by_account([prev_period]).groupby("계정명")["금액"].sum()
+        curr_cost = build_cost_by_account([end_period]).groupby("계정명")["금액"].sum()
         cost_change = curr_cost.subtract(prev_cost, fill_value=0).rename("증감액").sort_values(ascending=False)
     top_cost_name = cost_change.index[0] if cost_change is not None and cost_change.iloc[0] > 0 else None
 
     # ② 영업이익 변화
     profit_change_pct = None
     if prev_period is not None:
-        prev_profit = calc_operating_profit(prev_period)
+        prev_profit = calc_operating_profit([prev_period])
+        current_month_profit = calc_operating_profit([end_period])
         if prev_profit:
-            profit_change_pct = (kpis["영업이익"] - prev_profit) / prev_profit * 100
+            profit_change_pct = (current_month_profit - prev_profit) / prev_profit * 100
 
     if profit_change_pct is None:
         insights.append("전월 데이터가 없어 영업이익 변동을 비교할 수 없습니다.")
@@ -549,5 +568,5 @@ def generate_cfo_insight(period, kpis, bu_summary, budget_summary, cost_summary)
 
 st.divider()
 section_header("⑨", "AI CFO Insight 📌")
-cfo_insights = generate_cfo_insight(selected_period, kpis, bu_summary, budget_summary, cost_summary)
+cfo_insights = generate_cfo_insight(selected_periods, kpis, bu_summary, budget_summary)
 st.markdown("\n".join(f"- {line}" for line in cfo_insights))
