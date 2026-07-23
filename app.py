@@ -371,22 +371,51 @@ def build_cost_by_account(periods_list):
     return cost.groupby(["계정분류", "계정명"])["금액"].sum().reset_index()
 
 
-def build_cost_treemap(summary):
-    summary = summary.copy()
-    summary["금액_백만원"] = summary["금액"] / 1e6
-    fig = px.treemap(summary, path=["계정분류", "계정명"], values="금액_백만원", color="계정분류")
-    fig.update_traces(
-        texttemplate="%{label}<br>%{value:,.0f}백만원<br>%{percentRoot:.1%}",
-        hovertemplate="%{label}<br>금액: %{value:,.0f}백만원<br>전체 대비: %{percentRoot:.1%}<extra></extra>",
+def build_cost_pareto_chart(summary):
+    df = summary.sort_values("금액", ascending=False).reset_index(drop=True)
+    df["금액_백만원"] = df["금액"] / 1e6
+    df["누적비중"] = df["금액"].cumsum() / df["금액"].sum() * 100
+
+    color_map = {"원가": "#D62728", "판관비": "#4C78A8"}
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    fig.add_trace(
+        go.Bar(
+            x=df["계정명"],
+            y=df["금액_백만원"],
+            marker_color=[color_map.get(c, "#888888") for c in df["계정분류"]],
+            customdata=df["계정분류"],
+            hovertemplate="%{x} (%{customdata})<br>금액: %{y:,.0f}백만원<extra></extra>",
+            name="금액",
+        ),
+        secondary_y=False,
     )
-    fig.update_layout(title="비용 계정별 구성 (Treemap)")
+    fig.add_trace(
+        go.Scatter(
+            x=df["계정명"],
+            y=df["누적비중"],
+            mode="lines+markers",
+            line=dict(color="#F58518", width=3),
+            marker=dict(size=8),
+            hovertemplate="%{x}<br>누적 비중: %{y:.1f}%<extra></extra>",
+            name="누적 비중",
+        ),
+        secondary_y=True,
+    )
+    fig.add_hline(y=80, line_dash="dot", line_color="gray", secondary_y=True)
+    fig.update_yaxes(title_text="금액 (백만원)", secondary_y=False)
+    fig.update_yaxes(title_text="누적 비중 (%)", range=[0, 105], secondary_y=True)
+    fig.update_layout(
+        title="비용 계정별 파레토 분석 (금액 큰 순 + 누적 비중)",
+        template="plotly_white",
+        showlegend=False,
+    )
     return fig
 
 
 st.divider()
 section_header("④", "비용 분석")
 cost_summary = build_cost_by_account(selected_periods)
-st.plotly_chart(build_cost_treemap(cost_summary), use_container_width=True)
+st.plotly_chart(build_cost_pareto_chart(cost_summary), use_container_width=True)
 
 
 def build_budget_vs_actual(periods_list):
