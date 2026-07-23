@@ -161,19 +161,38 @@ else:  # 연별
 
 st.sidebar.caption(f"데이터 범위: {periods[0]} ~ {periods[-1]}")
 
+bu_options = ["전체"] + sorted(product["사업부"].unique())
+selected_bu = st.sidebar.selectbox("사업부 선택", bu_options)
+
+if selected_bu == "전체":
+    sales_scoped = sales
+    gl_classified_scoped = gl_classified
+    budget_scoped = budget
+else:
+    bu_product_codes = product.loc[product["사업부"] == selected_bu, "제품코드"]
+    sales_scoped = sales[sales["제품코드"].isin(bu_product_codes)]
+    gl_classified_scoped = gl_classified[gl_classified["사업부"] == selected_bu]
+    budget_scoped = budget[budget["사업부"] == selected_bu]
+
+if selected_bu != "전체":
+    st.info(
+        f"현재 **{selected_bu}** 사업부 기준으로 필터링된 데이터를 보고 있습니다. "
+        "(③ 사업부별 수익성, ⑤ 예산 대비 실적은 항상 전체 사업부를 비교합니다)"
+    )
+
 
 def calc_total_revenue(periods_list):
-    return sales.loc[sales["회계기간"].isin(periods_list), "공급가액"].sum()
+    return sales_scoped.loc[sales_scoped["회계기간"].isin(periods_list), "공급가액"].sum()
 
 
 def calc_cost_components(periods_list):
-    sales_m = sales.loc[sales["회계기간"].isin(periods_list)].merge(
+    sales_m = sales_scoped.loc[sales_scoped["회계기간"].isin(periods_list)].merge(
         product[["제품코드", "표준원가"]], on="제품코드", how="left"
     )
     total_cogs = (sales_m["수량"] * sales_m["표준원가"]).sum()
 
-    total_sga = gl_classified.loc[
-        gl_classified["회계기간"].isin(periods_list) & (gl_classified["계정분류"] == "판관비"),
+    total_sga = gl_classified_scoped.loc[
+        gl_classified_scoped["회계기간"].isin(periods_list) & (gl_classified_scoped["계정분류"] == "판관비"),
         "금액",
     ].sum()
 
@@ -192,7 +211,7 @@ def calc_kpis(periods_list, comparison_periods):
     operating_profit = total_revenue - total_cost
     operating_margin = operating_profit / total_revenue * 100 if total_revenue else None
 
-    total_budget = budget.loc[budget["회계기간"].isin(periods_list), "예산매출"].sum()
+    total_budget = budget_scoped.loc[budget_scoped["회계기간"].isin(periods_list), "예산매출"].sum()
     budget_achievement = total_revenue / total_budget * 100 if total_budget else None
 
     if comparison_periods:
@@ -235,13 +254,13 @@ row2_col3.metric(f"{comparison_word} 대비 증감률", fmt_percent(kpis["증감
 
 
 def build_monthly_summary(periods_list):
-    sales_f = sales.loc[sales["회계기간"].isin(periods_list)]
+    sales_f = sales_scoped.loc[sales_scoped["회계기간"].isin(periods_list)]
     revenue = sales_f.groupby("회계기간")["공급가액"].sum().rename("총매출")
 
     sales_cost = sales_f.merge(product[["제품코드", "표준원가"]], on="제품코드", how="left")
     cogs = (sales_cost["수량"] * sales_cost["표준원가"]).groupby(sales_cost["회계기간"]).sum().rename("COGS")
 
-    gl_f = gl_classified.loc[gl_classified["회계기간"].isin(periods_list)]
+    gl_f = gl_classified_scoped.loc[gl_classified_scoped["회계기간"].isin(periods_list)]
     sga = gl_f.loc[gl_f["계정분류"] == "판관비"].groupby("회계기간")["금액"].sum().rename("SGA")
 
     summary = pd.concat([revenue, cogs, sga], axis=1).fillna(0).reset_index()
@@ -347,7 +366,7 @@ st.markdown(
 
 
 def build_cost_by_account(periods_list):
-    gl_p = gl_classified.loc[gl_classified["회계기간"].isin(periods_list)]
+    gl_p = gl_classified_scoped.loc[gl_classified_scoped["회계기간"].isin(periods_list)]
     cost = gl_p.loc[gl_p["계정분류"].isin(["원가", "판관비"])]
     return cost.groupby(["계정분류", "계정명"])["금액"].sum().reset_index()
 
@@ -430,7 +449,7 @@ st.plotly_chart(build_budget_gauge_chart(budget_summary), use_container_width=Tr
 
 def build_customer_revenue(periods_list):
     revenue = (
-        sales.loc[sales["회계기간"].isin(periods_list)]
+        sales_scoped.loc[sales_scoped["회계기간"].isin(periods_list)]
         .groupby("거래처코드")["공급가액"]
         .sum()
         .rename("매출")
@@ -475,7 +494,7 @@ st.markdown(f"- 상위 10개 거래처 매출 집중도: 전체 매출의 **{top
 
 
 def build_product_group_revenue(periods_list):
-    sales_p = sales.loc[sales["회계기간"].isin(periods_list)].merge(
+    sales_p = sales_scoped.loc[sales_scoped["회계기간"].isin(periods_list)].merge(
         product[["제품코드", "사업부", "제품군"]], on="제품코드", how="left"
     )
     return sales_p.groupby(["사업부", "제품군"])["공급가액"].sum().reset_index()
@@ -611,3 +630,197 @@ cfo_insights = generate_cfo_insight(
     selected_periods, comparison_periods, comparison_word, kpis, bu_summary, budget_summary
 )
 st.markdown("\n".join(f"- {line}" for line in cfo_insights))
+
+
+# =========================================================
+# ⑩ 사업부 관점: 수익성 및 가격 효율성 분석
+# (charts/07~09 스크립트 로직을 이 앱의 로컬 데이터로 재사용한 섹션)
+# =========================================================
+st.divider()
+section_header("⑩", "사업부 관점: 수익성 및 가격 효율성 분석")
+
+section10_bu_options = ["전체"] + sorted(product["사업부"].unique())
+section10_bu = st.selectbox("사업부 선택 (이 섹션 전용)", section10_bu_options, key="section10_bu_select")
+
+if section10_bu == "전체":
+    section10_sales = sales
+    section10_gl = gl_classified
+else:
+    section10_codes = product.loc[product["사업부"] == section10_bu, "제품코드"]
+    section10_sales = sales[sales["제품코드"].isin(section10_codes)]
+    section10_gl = gl_classified[gl_classified["사업부"] == section10_bu]
+
+
+# --- charts/07 로직: 영업이익률 게이지 ---
+def section10_calc_margin(sales_df, gl_df):
+    total_revenue = sales_df["공급가액"].sum()
+    sales_m = sales_df.merge(product[["제품코드", "표준원가"]], on="제품코드", how="left")
+    total_cogs = (sales_m["수량"] * sales_m["표준원가"]).sum()
+    total_sga = gl_df.loc[gl_df["계정분류"] == "판관비", "금액"].sum()
+    operating_profit = total_revenue - total_cogs - total_sga
+    return operating_profit / total_revenue * 100 if total_revenue else 0
+
+
+def section10_build_gauge(scope_label, margin, by_bu_margin=None):
+    fig = go.Figure()
+    fig.add_trace(
+        go.Indicator(
+            mode="gauge+number",
+            value=margin,
+            number={"suffix": "%", "valueformat": ".1f"},
+            title={"text": f"영업이익률 ({scope_label})", "font": {"size": 20}},
+            gauge={
+                "axis": {"range": [-50, 50]},
+                "bar": {"color": "#D62728" if margin < 0 else "#2E7D32"},
+                "steps": [
+                    {"range": [-50, 0], "color": "#F4C7C3"},
+                    {"range": [0, 50], "color": "#C9E4CA"},
+                ],
+                "threshold": {"line": {"color": "black", "width": 3}, "thickness": 0.8, "value": 0},
+            },
+            domain={"x": [0, 0.55] if by_bu_margin else [0, 1], "y": [0, 1]},
+        )
+    )
+    if by_bu_margin:
+        n = len(by_bu_margin)
+        card_height = 1 / n
+        for i, (bu_name, bu_margin) in enumerate(by_bu_margin.items()):
+            color = "#D62728" if bu_margin < 0 else "#2E7D32"
+            fig.add_trace(
+                go.Indicator(
+                    mode="number",
+                    value=bu_margin,
+                    number={"suffix": "%", "valueformat": ".1f", "font": {"color": color, "size": 36}},
+                    title={"text": f"{bu_name} 영업이익률", "font": {"size": 14}},
+                    domain={
+                        "x": [0.65, 1],
+                        "y": [1 - (i + 1) * card_height + 0.08, 1 - i * card_height - 0.08],
+                    },
+                )
+            )
+    fig.update_layout(template="plotly_white", height=350)
+    return fig
+
+
+if section10_bu == "전체":
+    section10_overall_margin = section10_calc_margin(section10_sales, section10_gl)
+    section10_by_bu_margin = {}
+    for bu_name in section10_bu_options[1:]:
+        bu_codes = product.loc[product["사업부"] == bu_name, "제품코드"]
+        section10_by_bu_margin[bu_name] = section10_calc_margin(
+            sales[sales["제품코드"].isin(bu_codes)],
+            gl_classified[gl_classified["사업부"] == bu_name],
+        )
+    st.plotly_chart(
+        section10_build_gauge("전체", section10_overall_margin, section10_by_bu_margin),
+        use_container_width=True,
+    )
+else:
+    section10_margin = section10_calc_margin(section10_sales, section10_gl)
+    st.plotly_chart(section10_build_gauge(section10_bu, section10_margin), use_container_width=True)
+
+
+# --- charts/08 로직: 제품 원가-단가 산점도 ---
+def section10_build_scatter(sales_df, scope_label):
+    agg = sales_df.groupby("제품코드")["단가"].mean().rename("평균단가").reset_index()
+    agg = agg.merge(product[["제품코드", "표준원가"]], on="제품코드", how="left")
+
+    if len(agg) < 2:
+        return None, agg
+
+    corr = agg["표준원가"].corr(agg["평균단가"])
+    fig = px.scatter(
+        agg,
+        x="표준원가",
+        y="평균단가",
+        trendline="ols",
+        hover_data={"제품코드": True},
+        labels={"표준원가": "표준원가 (원)", "평균단가": "평균 판매단가 (원)"},
+        title=f"제품별 표준원가 vs 평균 판매단가 ({scope_label})",
+    )
+    fig.update_traces(marker=dict(size=8, color="#4C78A8", opacity=0.7), selector=dict(mode="markers"))
+    fig.update_traces(line=dict(color="#D62728", width=2), selector=dict(mode="lines"))
+    fig.add_annotation(
+        xref="paper",
+        yref="paper",
+        x=0.98,
+        y=0.98,
+        text=f"r = {corr:.2f}",
+        showarrow=False,
+        font=dict(size=16, color="#333333"),
+        bgcolor="rgba(255,255,255,0.7)",
+    )
+    fig.update_layout(template="plotly_white")
+    return fig, agg
+
+
+section10_scatter_fig, section10_scatter_data = section10_build_scatter(section10_sales, section10_bu)
+if section10_scatter_fig is not None:
+    st.plotly_chart(section10_scatter_fig, use_container_width=True)
+else:
+    st.warning(f"{section10_bu} 사업부는 산점도를 그리기에 제품 수가 부족합니다.")
+
+
+# --- charts/09 로직: 사업부 성과 비교 (선택과 무관하게 항상 전체 사업부 비교) ---
+def section10_build_bu_comparison():
+    margin_rows = []
+    for bu_name in section10_bu_options[1:]:
+        bu_codes = product.loc[product["사업부"] == bu_name, "제품코드"]
+        margin_rows.append(
+            {
+                "사업부": bu_name,
+                "영업이익률": section10_calc_margin(
+                    sales[sales["제품코드"].isin(bu_codes)],
+                    gl_classified[gl_classified["사업부"] == bu_name],
+                ),
+            }
+        )
+    margin_df = pd.DataFrame(margin_rows)
+
+    budget_bu = budget.groupby("사업부")["예산매출"].sum().rename("예산")
+    sales_bu = (
+        sales.merge(product[["제품코드", "사업부"]], on="제품코드", how="left")
+        .groupby("사업부")["공급가액"]
+        .sum()
+        .rename("실적")
+    )
+    budget_df = pd.concat([budget_bu, sales_bu], axis=1).reset_index()
+    budget_df["예산달성률"] = budget_df["실적"] / budget_df["예산"] * 100
+
+    def bar_colors(bu_series):
+        return ["#2E7D32" if bu == "제약" else "#B0B0B0" for bu in bu_series]
+
+    fig = make_subplots(rows=1, cols=2, subplot_titles=("사업부별 영업이익률", "사업부별 예산달성률"))
+    fig.add_trace(
+        go.Bar(
+            x=margin_df["사업부"],
+            y=margin_df["영업이익률"],
+            marker_color=bar_colors(margin_df["사업부"]),
+            text=[f"{v:.1f}%" for v in margin_df["영업이익률"]],
+            textposition="outside",
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Bar(
+            x=budget_df["사업부"],
+            y=budget_df["예산달성률"],
+            marker_color=bar_colors(budget_df["사업부"]),
+            text=[f"{v:.1f}%" for v in budget_df["예산달성률"]],
+            textposition="outside",
+        ),
+        row=1,
+        col=2,
+    )
+    fig.update_yaxes(title_text="영업이익률 (%)", row=1, col=1)
+    fig.update_yaxes(title_text="예산달성률 (%)", row=1, col=2)
+    fig.update_layout(
+        title="사업부별 성과 비교 (제약 강조, OLED 대조 · 항상 전체 비교)",
+        template="plotly_white",
+        showlegend=False,
+    )
+    return fig
+
+
+st.plotly_chart(section10_build_bu_comparison(), use_container_width=True)
