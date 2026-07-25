@@ -853,3 +853,22 @@ def section10_build_bu_comparison():
 
 
 st.plotly_chart(section10_build_bu_comparison(), use_container_width=True)
+
+
+# --- ⑪ 종합 리포트: 사업부손익 결산품질 개선 (위키 분석 결과 문서 임베드) ---
+section_header("⑪", "종합 리포트: 사업부손익 결산품질 개선")
+
+REPORT_PATH = os.path.join(os.path.dirname(__file__), "reports", "사업부손익_결산품질_개선_리포트.md")
+
+with open(REPORT_PATH, encoding="utf-8") as f:
+    report_text = f.read()
+
+st.caption("12개 위키 인사이트 노트를 종합한 결산품질·수익성 개선 리포트입니다.")
+st.download_button(
+    "📄 리포트 원문 다운로드 (.md)",
+    data=report_text,
+    file_name="사업부손익_결산품질_개선_리포트.md",
+    mime="text/markdown",
+)
+with st.expander("리포트 전체 보기", expanded=False):
+    st.markdown(report_text)
