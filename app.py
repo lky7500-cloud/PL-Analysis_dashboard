@@ -65,6 +65,13 @@ def load_all_excel_data(data_dir=DATA_DIR):
     return dataframes
 
 
+@st.cache_data
+def load_budget_execution_data(data_dir=DATA_DIR):
+    """data 폴더의 data_budget_execution.csv를 읽어온다."""
+    file_path = os.path.join(data_dir, "data_budget_execution.csv")
+    return pd.read_csv(file_path, encoding="utf-8-sig")
+
+
 def get_existing_columns(df, required_columns):
     """required_columns 중 df에 실제로 존재하는 컬럼만 반환한다."""
     return [col for col in required_columns if col in df.columns]
@@ -84,6 +91,8 @@ sales = dataframes["05_매출상세.xlsx"]
 gl = dataframes["06_GL원장.xlsx"]
 
 gl_classified = gl.merge(account[["계정코드", "계정분류"]], on="계정코드", how="left")
+
+budget_exec = load_budget_execution_data()
 
 st.markdown(
     """
@@ -168,11 +177,13 @@ if selected_bu == "전체":
     sales_scoped = sales
     gl_classified_scoped = gl_classified
     budget_scoped = budget
+    budget_exec_scoped = budget_exec
 else:
     bu_product_codes = product.loc[product["사업부"] == selected_bu, "제품코드"]
     sales_scoped = sales[sales["제품코드"].isin(bu_product_codes)]
     gl_classified_scoped = gl_classified[gl_classified["사업부"] == selected_bu]
     budget_scoped = budget[budget["사업부"] == selected_bu]
+    budget_exec_scoped = budget_exec[budget_exec["department"] == selected_bu]
 
 if selected_bu != "전체":
     st.info(
@@ -241,7 +252,7 @@ def fmt_percent(value):
     return f"{value:+.1f}%" if value is not None else "N/A"
 
 
-tab_dashboard, tab_report = st.tabs(["📊 대시보드", "📄 종합 리포트"])
+tab_dashboard, tab_budget_exec, tab_report = st.tabs(["📊 대시보드", "🧾 예산집행", "📄 종합 리포트"])
 
 with tab_dashboard:
     section_header("①", "KPI 요약")
@@ -856,6 +867,165 @@ with tab_dashboard:
 
 
     st.plotly_chart(section10_build_bu_comparison(), use_container_width=True)
+
+
+with tab_budget_exec:
+    section_header("⑫", "예산집행 KPI 요약")
+
+    budget_exec_filtered = budget_exec_scoped[budget_exec_scoped["period"].isin(selected_periods)]
+
+    total_budget_exec = budget_exec_filtered["budget_amount"].sum()
+    total_actual_exec = budget_exec_filtered["actual_amount"].sum()
+    total_variance_exec = total_actual_exec - total_budget_exec
+    exec_rate = total_actual_exec / total_budget_exec * 100 if total_budget_exec else None
+
+    exec_col1, exec_col2, exec_col3, exec_col4 = st.columns(4)
+    exec_col1.metric("예산", fmt_amount(total_budget_exec))
+    exec_col2.metric("실집행", fmt_amount(total_actual_exec))
+    exec_col3.metric("차이", fmt_amount(total_variance_exec))
+    exec_col4.metric("집행률", f"{exec_rate:.1f}%" if exec_rate is not None else "N/A")
+
+
+    def build_monthly_budget_exec_trend(df):
+        summary = df.groupby("period")[["budget_amount", "actual_amount"]].sum().reset_index().sort_values("period")
+        fig = go.Figure()
+        for column, label, color in [
+            ("budget_amount", "예산", "#4C78A8"),
+            ("actual_amount", "실집행", "#D62728"),
+        ]:
+            fig.add_trace(
+                go.Scatter(
+                    x=summary["period"],
+                    y=summary[column] / 1e6,
+                    name=label,
+                    mode="lines+markers",
+                    line=dict(color=color),
+                    hovertemplate=f"{label}: " + "%{y:,.0f}백만원<extra></extra>",
+                )
+            )
+        fig.update_layout(
+            title="월별 예산 집행 추이",
+            xaxis_title="period",
+            yaxis_title="금액 (백만원)",
+            hovermode="x unified",
+            template="plotly_white",
+        )
+        return fig
+
+
+    st.divider()
+    section_header("⑬", "월별 집행 추이")
+    st.plotly_chart(build_monthly_budget_exec_trend(budget_exec_scoped), use_container_width=True)
+
+
+    def build_department_exec_rate(df):
+        summary = df.groupby("department")[["budget_amount", "actual_amount"]].sum().reset_index()
+        summary["집행률"] = summary["actual_amount"] / summary["budget_amount"] * 100
+        return summary.sort_values("집행률", ascending=False)
+
+
+    def build_department_exec_rate_chart(summary):
+        fig = go.Figure(
+            go.Bar(
+                x=summary["department"],
+                y=summary["집행률"],
+                marker_color=["#54A24B" if v <= 100 else "#D62728" for v in summary["집행률"]],
+                text=[f"{v:.1f}%" for v in summary["집행률"]],
+                textposition="outside",
+                hovertemplate="%{x}<br>집행률: %{y:.1f}%<extra></extra>",
+            )
+        )
+        fig.add_hline(y=100, line_dash="dot", line_color="gray")
+        fig.update_layout(
+            title="부서별 집행률",
+            yaxis_title="집행률 (%)",
+            template="plotly_white",
+            showlegend=False,
+        )
+        return fig
+
+
+    st.divider()
+    section_header("⑭", "부서별 집행률")
+    dept_exec_summary = build_department_exec_rate(budget_exec_filtered)
+    st.plotly_chart(build_department_exec_rate_chart(dept_exec_summary), use_container_width=True)
+
+
+    def build_account_budget_vs_actual(df):
+        summary = df.groupby("account_name")[["budget_amount", "actual_amount"]].sum().reset_index()
+        return summary.sort_values("budget_amount")
+
+
+    def build_account_budget_vs_actual_chart(summary):
+        fig = go.Figure()
+        fig.add_trace(
+            go.Bar(
+                x=summary["budget_amount"] / 1e6,
+                y=summary["account_name"],
+                name="예산",
+                orientation="h",
+                marker_color="#4C78A8",
+                hovertemplate="%{y}<br>예산: %{x:,.0f}백만원<extra></extra>",
+            )
+        )
+        fig.add_trace(
+            go.Bar(
+                x=summary["actual_amount"] / 1e6,
+                y=summary["account_name"],
+                name="실적",
+                orientation="h",
+                marker_color="#D62728",
+                hovertemplate="%{y}<br>실적: %{x:,.0f}백만원<extra></extra>",
+            )
+        )
+        fig.update_layout(
+            title="계정별 예산 vs 실적",
+            xaxis_title="금액 (백만원)",
+            barmode="group",
+            template="plotly_white",
+        )
+        return fig
+
+
+    st.divider()
+    section_header("⑮", "계정별 예산 vs 실적")
+    account_exec_summary = build_account_budget_vs_actual(budget_exec_filtered)
+    st.plotly_chart(build_account_budget_vs_actual_chart(account_exec_summary), use_container_width=True)
+
+
+    def build_top10_over_budget(df):
+        top10 = df.sort_values("variance_amount", ascending=False).head(10).copy()
+        top10["variance_rate(%)"] = (top10["variance_rate"] * 100).round(1)
+        return top10[
+            [
+                "execution_id",
+                "period",
+                "department",
+                "account_name",
+                "budget_amount",
+                "actual_amount",
+                "variance_amount",
+                "variance_rate(%)",
+                "status",
+            ]
+        ]
+
+
+    st.divider()
+    section_header("⑯", "예산 초과 TOP10")
+    top10_over_budget = build_top10_over_budget(budget_exec_filtered)
+    st.dataframe(
+        top10_over_budget.style.format(
+            {
+                "budget_amount": "{:,.0f}",
+                "actual_amount": "{:,.0f}",
+                "variance_amount": "{:,.0f}",
+                "variance_rate(%)": "{:.1f}",
+            }
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
 
 
 with tab_report:
