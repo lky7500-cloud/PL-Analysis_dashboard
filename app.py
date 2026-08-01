@@ -1081,16 +1081,19 @@ with tab_product_margin:
 
 
     def build_margin_scatter(df):
+        df = df.copy()
+        df["매출액(백만원)"] = df["매출액"] / 1e6
         fig = px.scatter(
             df,
-            x="매출액",
+            x="매출액(백만원)",
             y="매출총이익률",
             color="고매출저마진",
             color_discrete_map={True: "#D62728", False: "#4C78A8"},
             hover_data=["제품코드", "제품명", "사업부", "제품군"],
-            labels={"매출액": "매출액 (원)", "매출총이익률": "매출총이익률"},
+            labels={"매출액(백만원)": "매출액 (백만원)", "매출총이익률": "매출총이익률"},
             title="제품별 매출 × 매출총이익률 (빨강 = 고매출·저마진 교집합)",
         )
+        fig.update_xaxes(tickformat=",.0f")
         fig.update_yaxes(tickformat=".0%")
         fig.update_layout(template="plotly_white", legend_title_text="고매출·저마진")
         return fig
