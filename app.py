@@ -252,7 +252,43 @@ def fmt_percent(value):
     return f"{value:+.1f}%" if value is not None else "N/A"
 
 
-tab_dashboard, tab_budget_exec, tab_report = st.tabs(["📊 대시보드", "🧾 예산집행", "📄 종합 리포트"])
+def build_product_margin_table(sales_df, product_df):
+    """제품코드 단위 매출액·매출총이익률·개선여력을 계산한다.
+
+    건기식 제품군의 11~2월 거래는 공급가액에 20% 계절 할증이 포함돼 있어
+    (동절기 할증, 위키 i-007/i-013/i-014에서 확인) 원가율 계산 전에 제거한다.
+    """
+    df = sales_df.merge(product_df, on="제품코드")
+
+    winter_months = {"11", "12", "01", "02"}
+    is_winter = df["회계기간"].str[5:7].isin(winter_months)
+    is_health = df["제품군"] == "건기식"
+    surcharge = is_winter & is_health
+
+    df["공급가액_보정"] = df["공급가액"].astype(float)
+    df.loc[surcharge, "공급가액_보정"] = df.loc[surcharge, "공급가액"] / 1.2
+    df["표준원가총액"] = df["표준원가"] * df["수량"]
+
+    summary = df.groupby(["제품코드", "제품명", "사업부", "제품군"]).agg(
+        매출액=("공급가액_보정", "sum"),
+        표준원가총액=("표준원가총액", "sum"),
+    ).reset_index()
+    summary["매출총이익률"] = 1 - summary["표준원가총액"] / summary["매출액"]
+
+    n = len(summary)
+    cutoff = max(1, int(n * 0.25))
+    summary["매출순위"] = summary["매출액"].rank(ascending=False, method="min").astype(int)
+    summary["이익률순위"] = summary["매출총이익률"].rank(ascending=True, method="min").astype(int)
+    summary["고매출저마진"] = (summary["매출순위"] <= cutoff) & (summary["이익률순위"] <= cutoff)
+
+    avg_margin = summary["매출총이익률"].mean()
+    summary["개선여력"] = summary["매출액"] * (avg_margin - summary["매출총이익률"])
+    return summary
+
+
+tab_dashboard, tab_budget_exec, tab_product_margin, tab_report = st.tabs(
+    ["📊 대시보드", "🧾 예산집행", "📦 제품 마진갭", "📄 종합 리포트"]
+)
 
 with tab_dashboard:
     section_header("①", "KPI 요약")
@@ -1026,6 +1062,93 @@ with tab_budget_exec:
         use_container_width=True,
         hide_index=True,
     )
+
+
+with tab_product_margin:
+    section_header("⑰", "제품 마진갭 KPI 요약")
+    st.caption("매출은 높은데 이익률은 낮은 제품이 어디인지 찾는다 (표준원가 기준 매출총이익률, 건기식 동절기 할증 보정 반영)")
+
+    product_margin = build_product_margin_table(sales_scoped, product)
+
+    margin_col1, margin_col2, margin_col3, margin_col4 = st.columns(4)
+    margin_col1.metric("분석 대상 제품 수", f"{len(product_margin)}개")
+    margin_col2.metric("평균 매출총이익률", f"{product_margin['매출총이익률'].mean() * 100:.2f}%")
+    margin_col3.metric(
+        "이익률 스프레드",
+        f"{(product_margin['매출총이익률'].max() - product_margin['매출총이익률'].min()) * 100:.2f}%p",
+    )
+    margin_col4.metric("고매출·저마진 제품 수", f"{int(product_margin['고매출저마진'].sum())}개")
+
+
+    def build_margin_scatter(df):
+        fig = px.scatter(
+            df,
+            x="매출액",
+            y="매출총이익률",
+            color="고매출저마진",
+            color_discrete_map={True: "#D62728", False: "#4C78A8"},
+            hover_data=["제품코드", "제품명", "사업부", "제품군"],
+            labels={"매출액": "매출액 (원)", "매출총이익률": "매출총이익률"},
+            title="제품별 매출 × 매출총이익률 (빨강 = 고매출·저마진 교집합)",
+        )
+        fig.update_yaxes(tickformat=".0%")
+        fig.update_layout(template="plotly_white", legend_title_text="고매출·저마진")
+        return fig
+
+
+    st.divider()
+    section_header("⑱", "매출 × 이익률 분포")
+    st.plotly_chart(build_margin_scatter(product_margin), use_container_width=True)
+
+
+    def build_margin_top10(df):
+        top10 = df.sort_values("개선여력", ascending=False).head(10).copy()
+        top10["매출총이익률(%)"] = (top10["매출총이익률"] * 100).round(2)
+        return top10[
+            ["제품코드", "제품명", "사업부", "제품군", "매출액", "매출총이익률(%)", "개선여력"]
+        ]
+
+
+    st.divider()
+    section_header("⑲", "개선여력 TOP10 (매출액 × 이익률갭)")
+    st.dataframe(
+        build_margin_top10(product_margin).style.format(
+            {"매출액": "{:,.0f}", "매출총이익률(%)": "{:.2f}", "개선여력": "{:,.0f}"}
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
+    def build_bu_product_group_margin_chart(df):
+        summary = df.groupby(["사업부", "제품군"]).apply(
+            lambda g: 1 - g["표준원가총액"].sum() / g["매출액"].sum()
+        ).reset_index(name="매출총이익률")
+        summary["구분"] = summary["사업부"] + " · " + summary["제품군"]
+        summary = summary.sort_values("매출총이익률")
+        fig = go.Figure(
+            go.Bar(
+                x=summary["매출총이익률"] * 100,
+                y=summary["구분"],
+                orientation="h",
+                marker_color=["#D62728" if i == 0 else "#4C78A8" for i in range(len(summary))],
+                text=[f"{v:.2f}%" for v in summary["매출총이익률"] * 100],
+                textposition="outside",
+                hovertemplate="%{y}<br>매출총이익률: %{x:.2f}%<extra></extra>",
+            )
+        )
+        fig.update_layout(
+            title="사업부 × 제품군별 매출총이익률 (빨강 = 최저)",
+            xaxis_title="매출총이익률 (%)",
+            template="plotly_white",
+        )
+        return fig
+
+
+    st.divider()
+    section_header("⑳", "사업부 × 제품군별 이익률 비교")
+    st.plotly_chart(build_bu_product_group_margin_chart(product_margin), use_container_width=True)
+    st.caption("사업부·제품군 단위로는 이익률 격차가 1%p 안팎으로 좁아, 개선 대상은 위 개별 제품 TOP10에서 찾는 것을 권장한다.")
 
 
 with tab_report:
