@@ -56,6 +56,32 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 FONTS_DIR = os.path.join(os.path.dirname(__file__), "fonts")
 
 
+def _apply_table_column_widths(soup):
+    """각 표의 컬럼 폭을, 그 컬럼에서 가장 긴 텍스트 길이에 비례하도록 자동 계산해 부여한다.
+
+    fpdf2 write_html은 <table> 첫 번째 행의 셀에 적힌 width="NN%"만 컬럼 폭으로 읽으므로,
+    이 함수가 그 첫 행에 값을 채워 넣는다. 특정 표를 하드코딩하지 않고 모든 표에 동일하게 적용된다.
+    """
+    for table in soup.find_all("table"):
+        rows = table.find_all("tr")
+        if not rows:
+            continue
+        n_cols = len(rows[0].find_all(["td", "th"]))
+        if n_cols == 0:
+            continue
+        max_len = [1] * n_cols
+        for row in rows:
+            for i, cell in enumerate(row.find_all(["td", "th"])):
+                if i < n_cols:
+                    max_len[i] = max(max_len[i], len(cell.get_text()))
+        total = sum(max_len)
+        widths = [max(8.0, m / total * 100) for m in max_len]
+        scale = 100.0 / sum(widths)
+        widths = [round(w * scale, 1) for w in widths]
+        for cell, width in zip(rows[0].find_all(["td", "th"]), widths):
+            cell["width"] = f"{width}%"
+
+
 @st.cache_data
 def build_report_pdf(markdown_text):
     """마크다운 리포트를 PDF 바이트로 변환한다 (Noto Sans KR 임베드로 한글 지원)."""
@@ -66,6 +92,7 @@ def build_report_pdf(markdown_text):
     soup = BeautifulSoup(html_body, "html.parser")
     for cell in soup.find_all(["td", "th"]):
         cell.string = cell.get_text()
+    _apply_table_column_widths(soup)
 
     pdf = FPDF()
     pdf.add_page()
