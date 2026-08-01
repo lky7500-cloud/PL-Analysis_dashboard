@@ -1,10 +1,13 @@
 import glob
 import os
 
+import markdown as md_to_html
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from bs4 import BeautifulSoup
+from fpdf import FPDF
 from plotly.subplots import make_subplots
 
 st.set_page_config(page_title="PL Analysis Dashboard", page_icon="📊", layout="wide")
@@ -50,6 +53,27 @@ st.markdown(
 )
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+FONTS_DIR = os.path.join(os.path.dirname(__file__), "fonts")
+
+
+@st.cache_data
+def build_report_pdf(markdown_text):
+    """마크다운 리포트를 PDF 바이트로 변환한다 (Noto Sans KR 임베드로 한글 지원)."""
+    html_body = md_to_html.markdown(markdown_text, extensions=["tables", "fenced_code", "nl2br"])
+
+    # fpdf2의 write_html은 <td>/<th> 안에 중첩 태그(굵게 등)를 지원하지 않으므로
+    # 표 셀 안의 서식은 제거하고 텍스트만 남긴다(표 밖의 굵게·목록 등은 그대로 유지).
+    soup = BeautifulSoup(html_body, "html.parser")
+    for cell in soup.find_all(["td", "th"]):
+        cell.string = cell.get_text()
+
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.add_font("NotoSansKR", "", os.path.join(FONTS_DIR, "NotoSansKR-Regular.ttf"))
+    pdf.add_font("NotoSansKR", "B", os.path.join(FONTS_DIR, "NotoSansKR-Bold.ttf"))
+    pdf.set_font("NotoSansKR", size=10)
+    pdf.write_html(str(soup))
+    return bytes(pdf.output())
 
 
 @st.cache_data
@@ -1165,10 +1189,10 @@ with tab_report:
 
     st.caption("12개 위키 인사이트 노트를 종합한 결산품질·수익성 개선 리포트입니다.")
     st.download_button(
-        "📄 리포트 원문 다운로드 (.md)",
-        data=report_text,
-        file_name="사업부손익_결산품질_개선_리포트.md",
-        mime="text/markdown",
+        "📄 리포트 PDF 다운로드",
+        data=build_report_pdf(report_text),
+        file_name="사업부손익_결산품질_개선_리포트.pdf",
+        mime="application/pdf",
     )
     with st.expander("리포트 전체 보기", expanded=False):
         st.markdown(report_text)

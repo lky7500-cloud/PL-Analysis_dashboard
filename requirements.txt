@@ -4,3 +4,6 @@ openpyxl
 plotly
 numpy
 statsmodels
+markdown
+fpdf2
+beautifulsoup4
